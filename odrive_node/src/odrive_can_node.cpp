@@ -178,12 +178,15 @@ void ODriveCanNode::recv_callback(const can_frame& frame) {
         }
     }
     
-    if (ctrl_pub_flag_ == 0b1111) {
+    // Publish controller_status when heartbeat + encoder estimates are available.
+    // Iq (0b0100) and torques (0b1000) are optional — ODrive v3.x may not send them.
+    if ((ctrl_pub_flag_ & 0b0011) == 0b0011) {
         ctrl_publisher_->publish(ctrl_stat_);
         ctrl_pub_flag_ = 0;
     }
-    
-    if (odrv_pub_flag_ == 0b111) {
+
+    // Publish odrive_status when bus voltage is available (minimum useful field).
+    if (odrv_pub_flag_ & 0b100) {
         odrv_publisher_->publish(odrv_stat_);
         odrv_pub_flag_ = 0;
     }
