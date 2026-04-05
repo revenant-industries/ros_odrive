@@ -303,7 +303,7 @@ void ODriveCanNode::ctrl_msg_callback() {
         last_input_mode_ = input_mode;
     }
     
-    frame = can_frame{};
+    struct can_frame frame = {};
     switch (control_mode) {
         case ControlMode::kVoltageControl: {
             RCLCPP_ERROR(rclcpp::Node::get_logger(), "Voltage Control Mode (0) is not currently supported");
