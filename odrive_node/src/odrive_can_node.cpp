@@ -57,6 +57,14 @@ ODriveCanNode::ODriveCanNode(const std::string& node_name) : rclcpp::Node(node_n
 
     service_ = rclcpp::Node::create_service<AxisState>("request_axis_state", std::bind(&ODriveCanNode::service_callback, this, _1, _2), srv_qos_profile);
     service_clear_errors_ = rclcpp::Node::create_service<Empty>("clear_errors", std::bind(&ODriveCanNode::service_clear_errors_callback, this, _1, _2), srv_qos_profile);
+
+    // Publish from the executor thread (wall timer) instead of directly from
+    // the epoll thread.  Some RMW implementations (notably rmw_zenoh_cpp)
+    // require publish() to be called from the rclcpp executor context for
+    // the data to be flushed to subscribers.
+    publish_timer_ = rclcpp::Node::create_wall_timer(
+        std::chrono::milliseconds(5),
+        std::bind(&ODriveCanNode::publish_pending, this));
 }
 
 void ODriveCanNode::deinit() {
@@ -178,16 +186,26 @@ void ODriveCanNode::recv_callback(const can_frame& frame) {
         }
     }
     
-    // Publish controller_status when heartbeat + encoder estimates are available.
-    // Iq (0b0100) and torques (0b1000) are optional — ODrive v3.x may not send them.
+    // Snapshot data under lock and signal the executor-thread timer to
+    // publish.  Publishing from the epoll thread directly can fail with
+    // some RMW implementations that require the executor context to flush
+    // data.  The snapshot avoids holding the mutex during publish() and
+    // prevents torn reads from concurrent CAN updates.
     if ((ctrl_pub_flag_ & 0b0011) == 0b0011) {
-        ctrl_publisher_->publish(ctrl_stat_);
+        {
+            std::lock_guard<std::mutex> guard(ctrl_stat_mutex_);
+            ctrl_stat_snapshot_ = ctrl_stat_;
+        }
+        ctrl_pub_ready_.store(true, std::memory_order_release);
         ctrl_pub_flag_ = 0;
     }
 
-    // Publish odrive_status when bus voltage is available (minimum useful field).
     if (odrv_pub_flag_ & 0b100) {
-        odrv_publisher_->publish(odrv_stat_);
+        {
+            std::lock_guard<std::mutex> guard(odrv_stat_mutex_);
+            odrv_stat_snapshot_ = odrv_stat_;
+        }
+        odrv_pub_ready_.store(true, std::memory_order_release);
         odrv_pub_flag_ = 0;
     }
 }
@@ -314,6 +332,19 @@ void ODriveCanNode::ctrl_msg_callback() {
     }
 
     can_intf_.send_can_frame(frame);
+}
+
+void ODriveCanNode::publish_pending() {
+    // Called by the executor thread (wall timer at 200 Hz).
+    // Publishes snapshot data flagged as ready by the epoll thread.
+    // Uses latest-value semantics: rapid CAN updates between timer ticks
+    // are coalesced into a single publish of the most recent data.
+    if (ctrl_pub_ready_.exchange(false, std::memory_order_acq_rel)) {
+        ctrl_publisher_->publish(ctrl_stat_snapshot_);
+    }
+    if (odrv_pub_ready_.exchange(false, std::memory_order_acq_rel)) {
+        odrv_publisher_->publish(odrv_stat_snapshot_);
+    }
 }
 
 inline bool ODriveCanNode::verify_length(const std::string&name, uint8_t expected, uint8_t length) {

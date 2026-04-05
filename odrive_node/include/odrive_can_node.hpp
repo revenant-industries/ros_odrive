@@ -10,6 +10,7 @@
 #include "std_srvs/srv/empty.hpp"
 #include "socket_can.hpp"
 
+#include <atomic>
 #include <mutex>
 #include <condition_variable>
 #include <array>
@@ -50,11 +51,18 @@ private:
     std::mutex ctrl_stat_mutex_;
     ControllerStatus ctrl_stat_ = ControllerStatus();
     rclcpp::Publisher<ControllerStatus>::SharedPtr ctrl_publisher_;
-    
+    std::atomic<bool> ctrl_pub_ready_{false};
+    ControllerStatus ctrl_stat_snapshot_ = ControllerStatus();
+
     short int odrv_pub_flag_ = 0;
     std::mutex odrv_stat_mutex_;
     ODriveStatus odrv_stat_ = ODriveStatus();
     rclcpp::Publisher<ODriveStatus>::SharedPtr odrv_publisher_;
+    std::atomic<bool> odrv_pub_ready_{false};
+    ODriveStatus odrv_stat_snapshot_ = ODriveStatus();
+
+    rclcpp::TimerBase::SharedPtr publish_timer_;
+    void publish_pending();
 
     EpollEvent sub_evt_;
     std::mutex ctrl_msg_mutex_;
