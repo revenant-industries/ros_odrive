@@ -282,16 +282,26 @@ void ODriveCanNode::request_clear_errors_callback() {
 void ODriveCanNode::ctrl_msg_callback() {
 
     uint32_t control_mode;
-    struct can_frame frame;
-    frame.can_id = node_id_ << 5 | kSetControllerMode;
+    uint32_t input_mode;
     {
         std::lock_guard<std::mutex> guard(ctrl_msg_mutex_);
-        write_le<uint32_t>(ctrl_msg_.control_mode, frame.data);
-        write_le<uint32_t>(ctrl_msg_.input_mode,   frame.data + 4);
         control_mode = ctrl_msg_.control_mode;
+        input_mode = ctrl_msg_.input_mode;
     }
-    frame.can_dlc = 8;
-    can_intf_.send_can_frame(frame);
+
+    // Only send kSetControllerMode when it actually changes.
+    // Sending it every cycle (50 Hz) resets ODrive input filter state
+    // (e.g. POS_FILTER trajectory) and doubles CAN TX load needlessly.
+    if (control_mode != last_control_mode_ || input_mode != last_input_mode_) {
+        struct can_frame mode_frame = {};
+        mode_frame.can_id = node_id_ << 5 | kSetControllerMode;
+        write_le<uint32_t>(control_mode, mode_frame.data);
+        write_le<uint32_t>(input_mode,   mode_frame.data + 4);
+        mode_frame.can_dlc = 8;
+        can_intf_.send_can_frame(mode_frame);
+        last_control_mode_ = control_mode;
+        last_input_mode_ = input_mode;
+    }
     
     frame = can_frame{};
     switch (control_mode) {

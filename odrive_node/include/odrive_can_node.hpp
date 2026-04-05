@@ -68,6 +68,8 @@ private:
     std::mutex ctrl_msg_mutex_;
     ControlMessage ctrl_msg_ = ControlMessage();
     rclcpp::Subscription<ControlMessage>::SharedPtr subscriber_;
+    uint32_t last_control_mode_ = UINT32_MAX;  // force first send
+    uint32_t last_input_mode_ = UINT32_MAX;
 
     EpollEvent srv_evt_;
     uint32_t axis_state_;
