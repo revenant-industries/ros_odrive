@@ -7,6 +7,7 @@
 #include <sys/types.h>
 #include <linux/can.h>
 #include <linux/can/raw.h>
+#include <linux/can/error.h>
 #include <cerrno>
 #include <net/if.h>
 #include <sys/ioctl.h>
