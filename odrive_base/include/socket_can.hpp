@@ -23,6 +23,7 @@ private:
     EpollEventLoop::EvtId socket_evt_id_;
     FrameProcessor frame_processor_;
     bool broken_ = false;
+    uint32_t tx_fail_count_ = 0;
 
     void on_socket_event(uint32_t mask);
     void process_can_frame(const can_frame& frame) {

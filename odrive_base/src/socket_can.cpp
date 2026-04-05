@@ -78,15 +78,20 @@ void SocketCanIntf::deinit() {
 bool SocketCanIntf::send_can_frame(const can_frame& frame) {
     ssize_t nbytes = write(socket_id_, &frame, sizeof(frame));
     if (nbytes == -1) {
-        // EAGAIN/ENOBUFS: TX queue full — transient, next cycle will retry.
-        // ENETDOWN: interface down — will recover via restart-ms or respawn.
-        // EBADF: socket closed — node needs restart.
-        if (errno != EAGAIN && errno != ENOBUFS) {
-            std::cerr << "Failed to send CAN frame: " << strerror(errno) << std::endl;
+        tx_fail_count_++;
+        // Throttle: log every 100th failure to avoid spam while staying visible
+        if (tx_fail_count_ <= 3 || tx_fail_count_ % 100 == 0) {
+            std::cerr << "CAN TX failed (" << tx_fail_count_ << "x): "
+                      << strerror(errno) << std::endl;
         }
         return false;
     }
 
+    // Reset failure counter on successful send
+    if (tx_fail_count_ > 0) {
+        std::cerr << "CAN TX recovered after " << tx_fail_count_ << " failures" << std::endl;
+        tx_fail_count_ = 0;
+    }
     return true;
 }
 
@@ -95,32 +100,29 @@ void SocketCanIntf::on_socket_event(uint32_t mask) {
         while (read_nonblocking() && !broken_);
     }
     if (mask & EPOLLERR) {
-        // CAN bus errors (bus-off, error-passive, etc.) trigger EPOLLERR
-        // but the socket remains valid after the kernel's restart-ms
-        // auto-recovery.  Read the error frame to diagnose; only tear
-        // down the socket if the interface is truly gone.
-        struct can_frame frame;
-        ssize_t nbytes = read(socket_id_, &frame, sizeof(frame));
-        if (nbytes > 0 && (frame.can_id & CAN_ERR_FLAG)) {
-            if (frame.can_id & CAN_ERR_BUSOFF) {
-                std::cerr << "CAN bus-off detected, waiting for auto-recovery (restart-ms)" << std::endl;
-                return;  // socket is still valid — kernel will restart the controller
-            }
-            if (frame.can_id & CAN_ERR_RESTARTED) {
-                std::cerr << "CAN controller restarted successfully" << std::endl;
+        // CAN bus errors (bus-off, error-passive, etc.) trigger EPOLLERR.
+        // Use getsockopt(SO_ERROR) to query and CLEAR the socket error
+        // without touching the frame RX queue.  This is critical:
+        //   - read() would consume data frames (heartbeats/encoder) not error frames
+        //   - getsockopt() clears sk_err, preventing level-triggered epoll
+        //     from re-firing EPOLLERR every cycle
+        int sockerr = 0;
+        socklen_t errlen = sizeof(sockerr);
+        if (getsockopt(socket_id_, SOL_SOCKET, SO_ERROR, &sockerr, &errlen) == 0) {
+            if (sockerr == ENETDOWN || sockerr == ENODEV) {
+                std::cerr << "CAN interface lost: " << strerror(sockerr) << std::endl;
+                deinit();
                 return;
             }
-            // Other CAN error frame — log but do not tear down
-            std::cerr << "CAN error frame: id=0x" << std::hex << frame.can_id << std::dec << std::endl;
-            return;
-        }
-        if (nbytes < 0 && (errno == ENETDOWN || errno == EBADF)) {
-            std::cerr << "CAN interface down — socket unrecoverable" << std::endl;
+            // sockerr == 0: error already cleared (common after restart-ms recovery)
+            // sockerr == ENOBUFS: TX queue full, transient
+            // Other: transient CAN bus error, restart-ms handles recovery
+        } else {
+            // getsockopt itself failed — socket fd is likely invalid
+            std::cerr << "getsockopt(SO_ERROR) failed: " << strerror(errno) << std::endl;
             deinit();
             return;
         }
-        // Transient error or no error frame available — do not kill the socket
-        std::cerr << "CAN socket error (non-fatal)" << std::endl;
         return;
     }
     if (mask & ~(EPOLLIN | EPOLLERR)) {
