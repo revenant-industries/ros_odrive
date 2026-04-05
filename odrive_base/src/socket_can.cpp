@@ -89,8 +89,32 @@ void SocketCanIntf::on_socket_event(uint32_t mask) {
         while (read_nonblocking() && !broken_);
     }
     if (mask & EPOLLERR) {
-        std::cerr << "interface disappeared" << std::endl;
-        deinit();
+        // CAN bus errors (bus-off, error-passive, etc.) trigger EPOLLERR
+        // but the socket remains valid after the kernel's restart-ms
+        // auto-recovery.  Read the error frame to diagnose; only tear
+        // down the socket if the interface is truly gone.
+        struct can_frame frame;
+        ssize_t nbytes = read(socket_id_, &frame, sizeof(frame));
+        if (nbytes > 0 && (frame.can_id & CAN_ERR_FLAG)) {
+            if (frame.can_id & CAN_ERR_BUSOFF) {
+                std::cerr << "CAN bus-off detected, waiting for auto-recovery (restart-ms)" << std::endl;
+                return;  // socket is still valid — kernel will restart the controller
+            }
+            if (frame.can_id & CAN_ERR_RESTARTED) {
+                std::cerr << "CAN controller restarted successfully" << std::endl;
+                return;
+            }
+            // Other CAN error frame — log but do not tear down
+            std::cerr << "CAN error frame: id=0x" << std::hex << frame.can_id << std::dec << std::endl;
+            return;
+        }
+        if (nbytes < 0 && (errno == ENETDOWN || errno == EBADF)) {
+            std::cerr << "CAN interface down — socket unrecoverable" << std::endl;
+            deinit();
+            return;
+        }
+        // Transient error or no error frame available — do not kill the socket
+        std::cerr << "CAN socket error (non-fatal)" << std::endl;
         return;
     }
     if (mask & ~(EPOLLIN | EPOLLERR)) {
